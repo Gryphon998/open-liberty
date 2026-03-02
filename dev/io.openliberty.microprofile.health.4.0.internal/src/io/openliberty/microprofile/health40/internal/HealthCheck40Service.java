@@ -37,4 +37,16 @@ public interface HealthCheck40Service extends HealthCheck31Service {
      */
     public Status performFileHealthCheck(File file, String healthCheckProcedure);
 
+    /**
+     * @return true if file health checking is enabled
+     */
+    public boolean isFileHealthCheckingEnabled();
+
+    /**
+     * Check if health check endpoints should be enabled
+     *
+     * @return true if endpoints should be enabled (default), false otherwise
+     */
+    public boolean areEndpointsEnabled();
+
 }

@@ -14,7 +14,9 @@ package io.openliberty.microprofile.health40.internal;
 
 import java.io.File;
 import java.io.IOException;
+import java.util.Dictionary;
 import java.util.HashSet;
+import java.util.Hashtable;
 import java.util.Iterator;
 import java.util.Map;
 import java.util.Set;
@@ -31,6 +33,8 @@ import javax.servlet.http.HttpServletResponse;
 import org.eclipse.microprofile.config.ConfigProvider;
 import org.eclipse.microprofile.health.HealthCheckResponse;
 import org.eclipse.microprofile.health.HealthCheckResponse.Status;
+import org.osgi.framework.BundleContext;
+import org.osgi.framework.ServiceRegistration;
 import org.osgi.service.component.ComponentContext;
 import org.osgi.service.component.annotations.Activate;
 import org.osgi.service.component.annotations.Component;
@@ -43,6 +47,7 @@ import com.ibm.websphere.ras.Tr;
 import com.ibm.websphere.ras.TraceComponent;
 import com.ibm.ws.microprofile.health.internal.AppTracker;
 import com.ibm.ws.microprofile.health.services.HealthCheckBeanCallException;
+import com.ibm.wsspi.wab.configure.WABConfiguration;
 
 import io.openliberty.checkpoint.spi.CheckpointPhase;
 import io.openliberty.microprofile.health.internal.common.HealthCheckConstants;
@@ -94,13 +99,20 @@ public class HealthCheck40ServiceImpl implements HealthCheck40Service {
     protected volatile boolean isCheckPointFinished = false;
 
     /**
+     * Configuration for enabling/disabling health check endpoints
+     * null means not configured (defaults to true)
+     */
+    private volatile Boolean enableEndpoints = null;
+
+    /**
      *
      * Instead of relying on checking if checkIntervalMilliseconds is > 0,
      * we'll use this method for readability.
      *
      * @return If the server is configured to use file health check
      */
-    private boolean isFileHealthCheckingEnabled() {
+    @Override
+    public boolean isFileHealthCheckingEnabled() {
         return checkIntervalMilliseconds > 0;
     }
 
@@ -117,6 +129,7 @@ public class HealthCheck40ServiceImpl implements HealthCheck40Service {
     final AtomicBoolean readinessWarningAlreadyShown = new AtomicBoolean(false);
     final AtomicBoolean startupWarningAlreadyShown = new AtomicBoolean(false);
     AtomicInteger unstartedAppsCounter = new AtomicInteger(0);
+    private WABConfigManager publicWabConfigMgr;
 
     static Status DEFAULT_READINESS_STATUS;
 
@@ -208,10 +221,14 @@ public class HealthCheck40ServiceImpl implements HealthCheck40Service {
 
     @Activate
     protected void activate(ComponentContext cc, Map<String, Object> properties) {
-
         componentContext = cc;
+        publicWabConfigMgr = new WABConfigManager("healthCheckContextPath", "/health");
 
         processConfig();
+
+        if (!isFileHealthCheckingEnabled() && enableEndpoints != null) {
+            System.out.println("WARNING: Health endpoints configuration is set, but file health check is not enabled. Endpoints will always be registered.");
+        }
 
         /*
          * Handle special case durign activation.
@@ -220,6 +237,9 @@ public class HealthCheck40ServiceImpl implements HealthCheck40Service {
          * by applicationStarted(), but there are no apps!
          */
         if (isFileHealthCheckingEnabled() && isValidSystemForFileHealthCheck) {
+
+            // Manage the endpoints, according to the config
+            publicWabConfigMgr.manageEndpoints(cc, areEndpointsEnabled());
 
             /*
              * If there are no applications deployed.
@@ -240,6 +260,9 @@ public class HealthCheck40ServiceImpl implements HealthCheck40Service {
          */
         else if (!isFileHealthCheckingEnabled() && (startupCheckIntervalMilliseconds != HealthCheckConstants.CONFIG_NOT_SET)) {
             Tr.warning(tc, "startup.check.interval.config.only.set.CWMMH01012W");
+        } else {
+            // Always enable endpoints, if File-based Health Checks are not enabled.
+            publicWabConfigMgr.manageEndpoints(cc, true);
         }
 
         if (TraceComponent.isAnyTracingEnabled() && tc.isDebugEnabled()) {
@@ -267,6 +290,14 @@ public class HealthCheck40ServiceImpl implements HealthCheck40Service {
             processStartupCheckIntervalConfig(System.getenv(HealthCheckConstants.HEALTH_ENV_CONFIG_STARTUP_CHECK_INTERVAL));
         }
 
+        // Process enableEndpoints config
+        String serverEnableEndpointsConfig;
+        if ((serverEnableEndpointsConfig = (String) properties.get("enableEndpoints")) != null) {
+            processEnableEndpointsConfig(serverEnableEndpointsConfig);
+        } else {
+            processEnableEndpointsConfig(System.getenv("MP_HEALTH_ENABLE_ENDPOINTS"));
+        }
+
         if (isFileHealthCheckingEnabled()) {
             //Validate system for File Health Checks (i.e., File I/O)
             try {
@@ -278,6 +309,30 @@ public class HealthCheck40ServiceImpl implements HealthCheck40Service {
                 //Let FFDC handle this.
             }
         }
+    }
+
+    /**
+     * Process the enableEndpoints configuration
+     */
+    private void processEnableEndpointsConfig(String config) {
+        if (config != null) {
+            enableEndpoints = Boolean.parseBoolean(config);
+            System.out.println("Processed enableEndpoints config: " + enableEndpoints);
+        } else {
+            enableEndpoints = null; // Not configured, will default to true
+            System.out.println("enableEndpoints not configured, will default to true");
+        }
+    }
+
+    /**
+     * Get whether endpoints should be enabled
+     *
+     * @return true if endpoints should be enabled (default), false otherwise
+     */
+    @Override
+    public boolean areEndpointsEnabled() {
+        // If not configured, default to true
+        return enableEndpoints == null || enableEndpoints;
     }
 
     /**
@@ -386,6 +441,8 @@ public class HealthCheck40ServiceImpl implements HealthCheck40Service {
 
     @Modified
     protected void modified(ComponentContext context, Map<String, Object> properties) {
+        System.out.println("In Modified!!!");
+
         /*
          * During server.xml update, never check for server env.
          */
@@ -399,6 +456,17 @@ public class HealthCheck40ServiceImpl implements HealthCheck40Service {
             processStartupCheckIntervalConfig((String) properties.get(HealthCheckConstants.HEALTH_SERVER_CONFIG_STARTUP_CHECK_INTERVAL));
         }
 
+        boolean prev = areEndpointsEnabled();
+        // Process enableEndpoints configuration (always process, not dependent on file health check)
+        processEnableEndpointsConfig((String) properties.get("enableEndpoints"));
+
+        if (!isFileHealthCheckingEnabled() && enableEndpoints != null) {
+            System.out.println("WARNING: Health endpoints configuration is set, but file health check is not enabled. Endpoints will always be registered.");
+        }
+
+        // Manage the endpoints, if its been updated.
+        if (isFileHealthCheckingEnabled() && prev != areEndpointsEnabled())
+            publicWabConfigMgr.manageEndpoints(context, areEndpointsEnabled());
     }
 
     /** {@inheritDoc} */
@@ -542,11 +610,13 @@ public class HealthCheck40ServiceImpl implements HealthCheck40Service {
 
     @Deactivate
     protected void deactivate(ComponentContext cc, int reason) {
+        System.out.println("In Deactivate!!!");
 
         if (TraceComponent.isAnyTracingEnabled() && tc.isDebugEnabled()) {
             Tr.debug(tc, "HealthCheckServiceImpl is deactivated");
         }
         stopAllTimers();
+        publicWabConfigMgr.deactivate();
     }
 
     /**
@@ -928,6 +998,93 @@ public class HealthCheck40ServiceImpl implements HealthCheck40Service {
                 reportUpStatusFor(healthCheckProcedure);
             }
 
+        }
+    }
+
+    final static class WABConfigManager {
+        private final String contextPath;
+        private final String contextName;
+        ServiceRegistration<WABConfiguration> wabConfigReg;
+
+        public WABConfigManager(String contextName, String contextPath) {
+            this.contextName = contextName;
+            this.contextPath = contextPath;
+        }
+
+        public final void deactivate() {
+            System.out.println("In WAB Deactivate!! wabConfigReg=" + wabConfigReg);
+            if (wabConfigReg != null) {
+                try {
+                    wabConfigReg.unregister();
+                    deactivateEvent();
+                } catch (IllegalStateException e) {
+                    // BundleContext is no longer valid, service already unregistered
+                    System.out.println("BundleContext no longer valid during unregister, service already cleaned up");
+                } finally {
+                    wabConfigReg = null;
+                }
+            }
+        }
+
+        public void manageEndpoints(ComponentContext context, boolean enabled) {
+            if (enabled) {
+                System.out.println("Registering MpHealth Context root : " + enabled + " WAB config=" + wabConfigReg);
+                // Push WAB configuration to the WAB installer to start the WAB
+                pushConfiguration(context, contextPath);
+            } else {
+                System.out.println("De-Registering MpHealth Context root : " + enabled + " WAB config=" + wabConfigReg);
+                // Instead of unregistering, just mark it as disabled via properties
+                disableEndpoints();
+                //deactivate();
+            }
+        }
+
+        private void disableEndpoints() {
+            if (wabConfigReg != null) {
+                try {
+                    // Set a property to indicate disabled state without unregistering
+                    final Dictionary<String, String> props = new Hashtable<String, String>();
+                    props.put(WABConfiguration.CONTEXT_NAME, "healthCheckContextPath");
+                    props.put(WABConfiguration.CONTEXT_PATH, ""); // Empty path disables
+                    wabConfigReg.setProperties(props);
+                    System.out.println("Disabled endpoints via properties update");
+                } catch (IllegalStateException e) {
+                    // Context invalid
+                }
+            }
+        }
+
+        private final void pushConfiguration(ComponentContext context, String path) {
+            final BundleContext bundleContext = context.getBundleContext();
+            final Dictionary<String, String> props = new Hashtable<String, String>();
+            props.put(WABConfiguration.CONTEXT_NAME, "healthCheckContextPath");
+            props.put(WABConfiguration.CONTEXT_PATH, "/health");
+            if (wabConfigReg == null) {
+                wabConfigReg = bundleContext.registerService(WABConfiguration.class, new WABConfiguration() {
+                }, props);
+                registerEvent(props);
+            } else {
+                wabConfigReg.setProperties(props);
+                modifiedEvent(props);
+            }
+        }
+
+        public void registerEvent(Dictionary<String, String> props) {
+            System.out.println("Registered web app bundle: " + toString() + " props=" + props + " }");
+        }
+
+        public void modifiedEvent(Dictionary<String, String> props) {
+            System.out.println("Modified web app bundle: " + toString() + " props= " + props + " }");
+        }
+
+        public void deactivateEvent() {
+            System.out.println("Unregistered web app bundle: " + toString());
+        }
+
+        @Override
+        public String toString() {
+            return " WABConfigManager [contextPath=" + contextPath + ", contextName=" + contextName + ", wabConfigReg="
+                   + wabConfigReg + "]";
         }
     }
 

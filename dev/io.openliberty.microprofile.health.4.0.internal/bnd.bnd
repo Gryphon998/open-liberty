@@ -16,7 +16,7 @@
 
 bVersion=1.0
 
-Web-ContextPath: health
+Web-ContextPath: @healthCheckContextPath
 OL-VirtualHost: ${admin.virtual.host}
 
 WS-TraceGroup: HEALTH
@@ -74,6 +74,7 @@ testsrc: test/src
         com.ibm.websphere.org.osgi.service.component;version=latest,\
         com.ibm.ws.adaptable.module;version=latest,\
         com.ibm.ws.app.manager;version=latest,\
+        com.ibm.ws.app.manager.wab;version=latest,\
         com.ibm.ws.cdi.interfaces;version=latest,\
         com.ibm.ws.classloader.context;version=latest,\
         com.ibm.ws.classloading;version=latest,\
